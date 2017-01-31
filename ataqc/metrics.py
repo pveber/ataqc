@@ -165,15 +165,20 @@ file is paired end, then you should divide these counts by two.'''
     _init_args = ['fastq1', 'alignedbam', 'finalbam']
 
     def compute(self):
+        first_read_count, final_read_count, \
+        fract_reads_left = get_final_read_count(self.alignedbam,
+                                                self.finalbam)
+        flagstat, mapped_count = get_samtools_flagstat(self.alignedbam)
+        num_mapq, fract_mapq = get_fract_mapq(self.alignedbam)
+
         self._dict = {
-            'Reads in FASTQ': count_reads_fastq(self.fastq1),
-            'Aligned reads': count_reads(self.alignedbam),
-            'Reads after filtering for mapping quality': ,
-            'Reads after removing duplicates':,
-            'Reads after removing mitochondrial reads (final)':
-                count_reads(self.finalbam),
+            'Reads in FASTQ': first_read_count,
+            'Aligned reads': mapped_count,
+            'Reads after filtering for mapping quality': num_mapq,
+            'Reads after removing duplicates': int(num_mapq - read_dups),
+            'Reads after removing mitochondrial reads (final)': final_read_count,
         }
-        pass
+        
 
     def to_html(self):
         # Add comma formatting to metrics
@@ -190,7 +195,12 @@ class AligmentStats(MetricGroup):
     name = 'Alignment Statistics'
     description = ''
 
+    _init_args = ['alignmentlog']
+
     def compute(self):
+        self._dict = {
+            'Alignment log': get_bowtie_stats(self.alignmentlog)
+        }
         pass
 
 
@@ -198,7 +208,12 @@ class SamtoolsFlagstat(MetricGroup):
     name = 'Samtools Flagstats'
     description = ''
 
+    _init_args = ['alignedbam']
+
     def compute(self):
+        self._dict = {
+            'Samtools flagstat': get_samtools_flagstat(self.alignedbam)[0]
+        }
         pass
 
 
@@ -215,6 +230,24 @@ fraction is an indication of poor libraries. Based on prior experience, a
 final read fraction above 0.70 is a good library.'''
 
     def compute(self):
+
+        _init_args = ['outprefix', 'alignedbam', 'coordsortbam', 'duplog', 'finalbam', ]
+
+        paired_status = determine_paired(self.finalbam)
+        first_read_count, final_read_count, \
+        fract_reads_left = get_final_read_count(self.alignedbam,
+                                                self.finalbam)
+
+        self._dict = {
+            'Mapping quality > q30 (out of total)': get_fract_mapq(self.alignedbam),
+            'Duplicates (after filtering)': get_picard_dup_stats(self.duplog, paired_status),
+            'Mitochondrial reads (out of total)': get_chr_m(self.coordsortbam),
+            'Duplicates that are mitochondrial (out of all dups)': get_mito_dups(self.alignedbam,
+                                                    self.outprefix,
+                                                    paired_status,
+                                                    use_sambamba=USE_SAMBAMBA_MARKDUP),
+            'Final reads (after all filters)': (final_read_count, fract_reads_left),
+        }
         pass
 
     def to_html(self):
@@ -253,7 +286,16 @@ gives a gauge as to the validity of the yield predictions.'''
 
     _image_fields = ['preseq_yield_prediction']
 
+    _init_args = ['outprefix', 'alignedbam', 'pbc']
+
     def compute(self):
+
+        self._dict = {
+            'Encode library complexity': get_encode_complexity_measures(self.pbc),
+            'Picard library size estimate':get_picard_complexity_metrics(self.alignedbam,
+                                                            self.outprefix),
+            'Preseq yield prediction': preseq_plot(run_preseq(self.alignedbam, self.outprefix)[0])
+        }
         pass
 
     def to_html(self):
@@ -272,7 +314,18 @@ fragment length distribution and will show specific peak ratios.'''
 
     _image_fields = ['fraglen_dist']
 
+    _init_args = ['outprefix', 'finalbam']
+
     def compute(self):
+
+        insert_data, insert_plot = get_insert_distribution(self.finalbam, self.outprefix)
+
+        # TODO: paired end vs single end
+        self._dict = {
+            'Fragment length distribution': fragment_length_plot(insert_data)
+            'Nucleosomal fractions': fragment_length_qc(read_picard_histogram(insert_data))
+        }
+
         pass
 
     def to_html(self):
@@ -285,7 +338,23 @@ class PeakStats(MetricGroup):
 For a good ATAC-seq experiment in human, you expect to get 100k-200k peaks
 for a specific cell type'''
 
+    _init_args = ['peaks', 'naive_overlap_peaks', 'idr_peaks']
+
     def compute(self):
+        peak_counts = get_peak_counts(self.peaks, self.naive_overlap_peaks, self.idr_peaks)
+        raw_peak_summ, raw_peak_dist = get_region_size_metrics(self.peaks)
+        naive_peak_summ, naive_peak_dist = get_region_size_metrics(self.naive_overlap_peaks)
+        idr_peak_summ, idr_peak_dist = get_region_size_metrics(self.idr_peaks)
+
+        self._dict = {
+            'peak_counts': peak_counts,
+            'raw_peak_summ': raw_peak_summ,
+            'naive_peak_summ': naive_peak_summ,
+            'idr_peak_summ': idr_peak_summ,
+            'raw_peak_dist': raw_peak_dist,
+            'naive_peak_dist': naive_peak_dist,
+            'idr_peak_dist': idr_peak_dist
+        }
         pass
 
     def to_html(self):
@@ -299,7 +368,15 @@ Open chromatin assays are known to have significant GC bias. Please take this
 into consideration as necessary.
     '''
 
+    _init_args = ['ref', 'outprefix', 'finalbam']
+
     def compute(self):
+
+        self._dict = {
+            'GC Bias': plot_gc(get_gc(self.finalbam,
+                                         self.ref,
+                                         self.outprefix)[0])
+        }
         pass
 
     def to_html(self):
@@ -328,7 +405,43 @@ compared. The closer the sample is in signal distribution in the regions
 to your sample, the higher the correlation.''',
     }
 
+    _init_args = ['outprefix', 'genome', 'tss', 'dnase', 'blacklist', 'prom', 'enh', 'fastq1', 'finalbam', 'finalbed', 'peaks']
+
     def compute(self):
+
+        read_len = get_read_length(self.fastq1)
+        vplot_file, vplot_large_file, tss_point_val = make_vplot(self.finalbam, # Use final to avoid duplicates
+                                                             self.tss,
+                                                             self.outprefix,
+                                                             self.genome,
+                                                             read_len)
+
+        reads_dnase, fract_dnase, reads_blacklist, fract_blacklist, \
+        reads_prom, fract_prom, reads_enh, fract_enh, \
+        reads_peaks, fract_peaks = get_signal_to_noise(self.finalbed,
+                                                       self.dnase,
+                                                       self.blacklist,
+                                                       self.prom,
+                                                       self.enh,
+                                                       self.peaks)
+
+        ANNOT_ENRICHMENTS = OrderedDict([
+        ('Fraction of reads in universal DHS regions', (reads_dnase,
+                                                        fract_dnase)),
+        ('Fraction of reads in blacklist regions', (reads_blacklist,
+                                                    fract_blacklist)),
+        ('Fraction of reads in promoter regions', (reads_prom, fract_prom)),
+        ('Fraction of reads in enhancer regions', (reads_enh, fract_enh)),
+        ('Fraction of reads in called peak regions', (reads_peaks,
+                                                      fract_peaks)),
+    ])
+
+        self._dict = {
+            'Enrichment plots': b64encode(open(vplot_large_file, 'rb').read()),
+            'TSS enrichment': tss_point_val,
+            'Annotation enrichments':,
+
+        }
         pass
 
     def to_html(self):
