@@ -581,6 +581,7 @@ def get_samtools_flagstat(bam_file):
     logging.info('samtools flagstat...')
     results = pysam.flagstat(bam_file)
     flagstat = ''
+    mapped_reads = 0
     for line in results:
         logging.info(line.strip())
         flagstat += line
